@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: creditech-indatech
+    runtime: docker
+    plan: free
+    envVars:
+      - key: CREDITECH_ADMIN_USER
+        value: admin
+      - key: CREDITECH_ADMIN_PASSWORD
+        generateValue: true
+      - key: CREDITECH_SERVER_DB
+        value: "" # Pega aquí la cadena postgresql:// gratuita de Neon.tech o Supabase

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+build/
+dist/
+*.exe
+tools/cloudflared.exe
+respaldos/
+url_publica_telefono.txt
+.env
