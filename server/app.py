@@ -302,8 +302,47 @@ def export_debtors_excel() -> Response:
     )
 
 
-@app.post("/api/v1/devices", dependencies=[Depends(verify_admin)])
-def create_device(req: CreateDeviceRequest) -> dict:
+class GitHubPagesExportRequest(BaseModel):
+    devices: list[dict] = []
+
+
+@app.post("/api/v1/reports/debtors-from-json.xlsx")
+def export_debtors_excel_from_json(req: GitHubPagesExportRequest) -> Response:
+    """Genera el Excel (.xlsx) a partir de la lista de equipos enviada por la App PWA de GitHub Pages."""
+    dummy_devices = []
+    for idx, d in enumerate(req.devices):
+        dev = Device(
+            id=str(d.get("id") or f"dev_{idx}"),
+            client_name=str(d.get("client_name") or "Cliente"),
+            client_cedula=str(d.get("client_cedula") or "N/A"),
+            client_phone=str(d.get("client_phone") or ""),
+            laptop_model=str(d.get("laptop_model") or "Laptop"),
+            laptop_serial=str(d.get("laptop_serial") or ""),
+            enrollment_code=str(d.get("enrollment_code") or "CRD-0000"),
+            manual_status=str(d.get("manual_status") or "auto"),
+            manual_unlock_until=d.get("manual_unlock_until"),
+            lock_reason_override=str(d.get("lock_reason_override") or ""),
+        )
+        dev.installments = [
+            Installment(
+                id=str(inst.get("id") or f"inst_{idx}_{n}"),
+                device_id=dev.id,
+                number=int(inst.get("number", n + 1)),
+                due_date=str(inst.get("due_date") or date.today().isoformat()),
+                amount=float(inst.get("amount", 0.0)),
+                status=str(inst.get("status") or "pending"),
+                paid_at=inst.get("paid_at"),
+            )
+            for n, inst in enumerate(d.get("installments") or [])
+        ]
+        dummy_devices.append(dev)
+    xlsx_bytes = build_excel_report_bytes(dummy_devices)
+    filename = f"respaldo_deudores_creditech_{date.today().isoformat()}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
     first_due = parse_iso_date(req.first_due_date)
     if first_due is None:
         raise HTTPException(status_code=400, detail="Fecha de 1ª cuota inválida (use YYYY-MM-DD).")

@@ -547,7 +547,7 @@ DASHBOARD_HTML = (
     <div class="topbar-actions">
       <button class="btn btn-secondary" onclick="loadDevices()">↻ Actualizar</button>
       <button class="btn btn-secondary" onclick="openQuickPinModal()" style="border-color: #FCD34D; color: #FCD34D;">🔑 PIN Rápido por Cédula</button>
-      <a class="btn btn-secondary" href="/api/v1/reports/debtors.xlsx" download style="border-color: var(--brand); color: var(--brand);">📊 Excel de Deudores</a>
+      <a class="btn btn-secondary" href="/api/v1/reports/debtors.xlsx" onclick="downloadDebtorsExcel(event)" style="border-color: var(--brand); color: var(--brand);">📊 Excel de Deudores</a>
       <button class="btn btn-primary" onclick="openNewDeviceModal()">+ Nuevo Cliente</button>
     </div>
   </header>
@@ -653,7 +653,7 @@ DASHBOARD_HTML = (
       <span class="nav-icon">🔑</span>
       <span>PIN Cédula</span>
     </button>
-    <a class="nav-item" href="/api/v1/reports/debtors.xlsx" download>
+    <a class="nav-item" href="/api/v1/reports/debtors.xlsx" onclick="downloadDebtorsExcel(event)">
       <span class="nav-icon">📊</span>
       <span>Excel</span>
     </a>
@@ -906,6 +906,112 @@ DASHBOARD_HTML = (
       return digits ? `https://wa.me/${digits}?text=${encoded}` : `https://wa.me/?text=${encoded}`;
     }
 
+    function evaluatePolicyInBrowser(dev) {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayMs = new Date(todayIso + 'T00:00:00Z').getTime();
+      const insts = (dev.installments || []).slice().sort((a, b) => a.number - b.number);
+      const pending = insts.filter(i => i.status !== 'paid');
+      const paid = insts.filter(i => i.status === 'paid');
+      const overdue = pending.filter(i => i.due_date < todayIso);
+      const nextInst = pending.length ? pending[0] : null;
+      let daysUntilDue = null;
+      if (nextInst) {
+        const dueMs = new Date(nextInst.due_date + 'T00:00:00Z').getTime();
+        daysUntilDue = Math.round((dueMs - todayMs) / 86400000);
+      }
+
+      const graceUntil = dev.manual_unlock_until || null;
+      const hasGrace = graceUntil && graceUntil >= todayIso;
+      const manualStatus = dev.manual_status || 'auto';
+
+      let locked = false;
+      let lockReason = '';
+      if (manualStatus === 'locked' && !hasGrace) {
+        locked = true;
+        lockReason = dev.lock_reason_override || 'Equipo bloqueado remotamente por Creditech.';
+      } else if (manualStatus === 'auto' && overdue.length > 0 && !hasGrace) {
+        locked = true;
+        lockReason = `Cuota #${overdue[0].number} vencida el ${overdue[0].due_date} ($${Number(overdue[0].amount).toFixed(2)}).`;
+      }
+
+      const warningDueSoon = !locked && nextInst !== null && daysUntilDue !== null && daysUntilDue >= 0 && daysUntilDue <= 1;
+
+      const totalAmount = insts.reduce((s, i) => s + Number(i.amount || 0), 0);
+      const paidAmount = paid.reduce((s, i) => s + Number(i.amount || 0), 0);
+      const pendingAmount = Math.max(0, totalAmount - paidAmount);
+
+      dev.total_amount = totalAmount;
+      dev.paid_amount = paidAmount;
+      dev.pending_amount = pendingAmount;
+      dev.policy = {
+        locked,
+        lock_reason: lockReason,
+        warning_due_soon: warningDueSoon,
+        days_until_due: daysUntilDue,
+        next_installment: nextInst,
+        overdue_installments: overdue,
+        pending_count: pending.length,
+        paid_count: paid.length,
+        total_count: insts.length,
+      };
+      return dev;
+    }
+
+    function downloadLocalExcelCsv() {
+      const rows = [
+        ['Nombre del Cliente', 'Numero de Cedula', 'Telefono', 'Laptop', 'Serial', 'Codigo Creditech', 'Total Credito ($)', 'Lo que ha Pagado ($)', 'Lo que Falta por Pagar ($)', 'Cuotas Pagadas', 'Cuotas Pendientes', 'Proximo Vencimiento', 'Estado']
+      ];
+      ALL_DEVICES.forEach(raw => {
+        const d = evaluatePolicyInBrowser(raw);
+        const p = d.policy;
+        const stateStr = p.locked ? 'BLOQUEADO' : (p.warning_due_soon ? 'AVISO 1 DIA ANTES' : 'AL DIA');
+        const nextDue = p.next_installment ? p.next_installment.due_date : 'PAGADO';
+        rows.push([
+          d.client_name,
+          d.client_cedula,
+          d.client_phone || 'N/A',
+          d.laptop_model || 'Laptop',
+          d.laptop_serial || 'N/A',
+          d.enrollment_code || 'CRD-0000',
+          (d.total_amount || 0).toFixed(2),
+          (d.paid_amount || 0).toFixed(2),
+          (d.pending_amount || 0).toFixed(2),
+          `${p.paid_count}/${p.total_count}`,
+          String(p.pending_count),
+          nextDue,
+          stateStr
+        ]);
+      });
+      const csvContent = '\uFEFF' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\r\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `respaldo_deudores_creditech_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    async function downloadDebtorsExcel(e) {
+      if (e) e.preventDefault();
+      try {
+        const res = await fetch('/api/v1/reports/debtors.xlsx');
+        if (res.ok && (res.headers.get('content-type') || '').includes('spreadsheet')) {
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `respaldo_deudores_creditech_${new Date().toISOString().slice(0, 10)}.xlsx`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          return;
+        }
+      } catch (err) {}
+      downloadLocalExcelCsv();
+    }
+
     function renderTable() {
       const q = (document.getElementById('searchInput').value || '').toLowerCase().trim();
       const tbody = document.getElementById('devicesTableBody');
@@ -1099,19 +1205,55 @@ DASHBOARD_HTML = (
         frequency_days: parseInt(document.getElementById('f_frequency_days').value, 10),
       };
 
-      const res = await fetch('/api/v1/devices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        closeModal('newDeviceModal');
-        document.getElementById('newDeviceForm').reset();
-        await loadDevices();
-      } else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || 'No se pudo registrar'));
+      try {
+        const res = await fetch('/api/v1/devices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          closeModal('newDeviceModal');
+          document.getElementById('newDeviceForm').reset();
+          await loadDevices();
+          return;
+        }
+      } catch (err) {}
+
+      // Modo autónomo en el teléfono (GitHub Pages / Offline)
+      const firstDate = new Date(payload.first_due_date + 'T00:00:00Z');
+      const installments = [];
+      for (let i = 1; i <= payload.total_installments; i++) {
+        const d = new Date(firstDate.getTime() + (i - 1) * payload.frequency_days * 86400000);
+        installments.push({
+          id: 'inst_' + Date.now() + '_' + i,
+          number: i,
+          due_date: d.toISOString().slice(0, 10),
+          amount: payload.installment_amount,
+          status: 'pending',
+          paid_at: null
+        });
       }
+      const p1 = Math.floor(1000 + Math.random() * 9000);
+      const p2 = Math.floor(1000 + Math.random() * 9000);
+      const newDev = evaluatePolicyInBrowser({
+        id: 'dev_' + Date.now(),
+        client_name: payload.client_name,
+        client_cedula: payload.client_cedula,
+        client_phone: payload.client_phone,
+        laptop_model: payload.laptop_model,
+        laptop_serial: payload.laptop_serial,
+        enrollment_code: `CRD-${p1}-${p2}`,
+        manual_status: 'auto',
+        manual_unlock_until: null,
+        lock_reason_override: '',
+        installments
+      });
+      ALL_DEVICES.unshift(newDev);
+      saveLocalPocketDevices(ALL_DEVICES);
+      closeModal('newDeviceModal');
+      document.getElementById('newDeviceForm').reset();
+      updateStats();
+      renderTable();
     }
 
     async function quickLock(deviceId) {
@@ -1120,27 +1262,63 @@ DASHBOARD_HTML = (
         'Cuota vencida pendiente de pago. Comuníquese con Indatech / Creditech para desbloquear su equipo.'
       );
       if (reason === null) return;
-      await fetch(`/api/v1/devices/${deviceId}/lock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason }),
-      });
-      await loadDevices();
+      try {
+        const res = await fetch(`/api/v1/devices/${deviceId}/lock`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason }),
+        });
+        if (res.ok) {
+          await loadDevices();
+          return;
+        }
+      } catch (e) {}
+      const dev = ALL_DEVICES.find(x => x.id === deviceId);
+      if (dev) {
+        dev.manual_status = 'locked';
+        dev.lock_reason_override = reason;
+        evaluatePolicyInBrowser(dev);
+        saveLocalPocketDevices(ALL_DEVICES);
+        updateStats();
+        renderTable();
+      }
     }
 
     async function quickUnlock(deviceId) {
-      await fetch(`/api/v1/devices/${deviceId}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'auto', grace_days: 3 }),
-      });
-      await loadDevices();
+      try {
+        const res = await fetch(`/api/v1/devices/${deviceId}/unlock`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'auto', grace_days: 3 }),
+        });
+        if (res.ok) {
+          await loadDevices();
+          return;
+        }
+      } catch (e) {}
+      const dev = ALL_DEVICES.find(x => x.id === deviceId);
+      if (dev) {
+        dev.manual_status = 'auto';
+        const grace = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+        dev.manual_unlock_until = grace;
+        evaluatePolicyInBrowser(dev);
+        saveLocalPocketDevices(ALL_DEVICES);
+        updateStats();
+        renderTable();
+      }
     }
 
     async function openDeviceDetail(deviceId) {
-      const res = await fetch(`/api/v1/devices/${deviceId}`);
-      if (!res.ok) return;
-      const d = await res.json();
+      let d = null;
+      try {
+        const res = await fetch(`/api/v1/devices/${deviceId}`);
+        if (res.ok) d = await res.json();
+      } catch (e) {}
+      if (!d) {
+        d = ALL_DEVICES.find(x => x.id === deviceId);
+        if (d) evaluatePolicyInBrowser(d);
+      }
+      if (!d) return;
 
       document.getElementById('detailTitle').textContent = `${d.client_name} (${d.client_cedula})`;
       document.getElementById('detailSubtitle').textContent =
@@ -1205,21 +1383,53 @@ DASHBOARD_HTML = (
     }
 
     async function markInstallmentPaid(deviceId, installmentId) {
-      await fetch(`/api/v1/devices/${deviceId}/installments/${installmentId}/pay`, {
-        method: 'POST',
-      });
-      await openDeviceDetail(deviceId);
-      await loadDevices();
+      try {
+        const res = await fetch(`/api/v1/devices/${deviceId}/installments/${installmentId}/pay`, {
+          method: 'POST',
+        });
+        if (res.ok) {
+          await openDeviceDetail(deviceId);
+          await loadDevices();
+          return;
+        }
+      } catch (e) {}
+      const dev = ALL_DEVICES.find(x => x.id === deviceId);
+      if (dev) {
+        const inst = (dev.installments || []).find(i => i.id === installmentId);
+        if (inst) {
+          inst.status = 'paid';
+          inst.paid_at = new Date().toISOString();
+        }
+        if (dev.manual_status === 'locked') dev.manual_status = 'auto';
+        evaluatePolicyInBrowser(dev);
+        saveLocalPocketDevices(ALL_DEVICES);
+        updateStats();
+        renderTable();
+        await openDeviceDetail(deviceId);
+      }
     }
 
     async function generatePinForDevice(deviceId, phone) {
-      const res = await fetch(`/api/v1/devices/${deviceId}/offline-pin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ unlock_days: 30 }),
-      });
-      if (!res.ok) return;
-      const data = await res.json();
+      let data = null;
+      try {
+        const res = await fetch(`/api/v1/devices/${deviceId}/offline-pin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unlock_days: 30 }),
+        });
+        if (res.ok) data = await res.json();
+      } catch (e) {}
+      if (!data) {
+        const dev = ALL_DEVICES.find(x => x.id === deviceId);
+        if (!dev) return;
+        const pin = await generateOfflinePinInBrowser(dev.client_cedula, 30, 0);
+        data = {
+          client_name: dev.client_name,
+          client_cedula: dev.client_cedula,
+          unlock_days: 30,
+          pin
+        };
+      }
       const waText = `Hola ${data.client_name} (${data.client_cedula}), su pago ha sido registrado en Creditech by indatech. Su PIN de desbloqueo es: *${data.pin}*`;
       const waUrl = buildWhatsAppUrl(phone, waText);
 

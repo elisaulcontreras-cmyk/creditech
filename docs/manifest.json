@@ -1,0 +1,17 @@
+{
+  "name": "Creditech by indatech.",
+  "short_name": "Creditech",
+  "description": "App de Control de Laptops Financiadas, PINs por Cédula y Excel de Deudores",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#071D20",
+  "theme_color": "#071D20",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
